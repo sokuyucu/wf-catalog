@@ -1,0 +1,227 @@
+metadata:
+  name: k8s-cycle
+  generateName: k8s-cycle-
+  namespace: argo
+spec:
+  entrypoint: full-cycle
+  arguments:
+    parameters:
+    - name: terraform-script-repository
+      value: "http://167.233.12.7:30165/sokuyucu/terraform-kae.git"
+    - name: master-replicas
+      value: ''
+    - name: worker-replicas
+      value: ''
+    - name: api-token
+      value: ''
+    - name: cluster-name
+      value: ''
+# TEMPLATES + DAG
+  templates:
+  - name: key-gen
+    container:
+      image: hashicorp/terraform:latest
+      command: [sh,-c]
+      args: ["mkdir /home/key-pairs && ssh-keygen -t rsa -N '' -f /home/key-pairs/id_rsa"]
+    outputs:
+      artifacts:
+      - name: keys
+        path: /home/key-pairs/
+# TERRAFORM APPLY
+  - name: terraform-apply
+    inputs:
+        artifacts:
+          - name: keys
+            path: /home/ssh-keys
+          - name: terraform
+            path: /home/terraform
+            git:
+              repo: '{{workflow.parameters.terraform-script-repository}}'
+              depth: 1
+    outputs:
+        artifacts:
+          - name: tfdestroy
+            path: /home/tfdestroy
+          - name: kubeonetf
+            path: /home/kubeone-tf
+    script:
+        name: ''
+        image: 'hashicorp/terraform:latest'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: >
+          sed -i 's/"temp-token"/"{{workflow.parameters.api-token}}"/g'
+          /home/terraform/variables.tf
+
+          sed -i
+          's/"temp-cluster-name"/"{{workflow.parameters.cluster-name}}"/g'
+          /home/terraform/variables.tf
+
+          sed -i
+          's/temp-master-replicas/{{workflow.parameters.master-replicas}}/g'
+          /home/terraform/variables.tf
+
+          sed -i
+          's/temp-worker-replicas/{{workflow.parameters.worker-replicas}}/g'
+          /home/terraform/variables.tf
+
+          /bin/terraform init /home/terraform
+
+          /bin/terraform apply -auto-approve /home/terraform
+
+          mkdir /home/tfdestroy
+
+          /bin/terraform plan -destroy -out=/home/tfdestroy/destroy.plan
+          /home/terraform
+
+          cp /home/terraform/versions.tf /home/tfdestroy
+
+          mkdir /home/kubeone-tf
+
+          cp $PWD/terraform.tfstate /home/terraform/
+
+          pwd
+
+          cd /home/terraform
+
+          pwd
+
+          terraform output -json > tf.json
+
+          cp /home/terraform/kubeone.yaml /home/kubeone-tf
+
+          cp /home/terraform/tf.json /home/kubeone-tf
+
+          cp /home/terraform/credentials.yaml /home/kubeone-tf
+# TERRAFORM DESTROY
+  - name: terraform-destroy
+    inputs:
+        artifacts:
+          - name: keys
+            path: /home/ssh-keys
+          - name: tfdestroy
+            path: /home/terraform
+    script:
+        name: ''
+        image: 'hashicorp/terraform:latest'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: |
+          ls -la /home/terraform
+
+          /bin/terraform init /home/terraform
+
+          /bin/terraform apply /home/terraform/destroy.plan
+# KUBEONE APPLY
+  - name: kubeone-apply
+    inputs:
+        artifacts:
+          - name: keys
+            path: /kubeone-kae/ssh-keys
+          - name: kubeonetf
+            path: /kubeone-kae/kubeone-tf
+    script:
+        name: ''
+        image: 'sokuyucu/kubeone:1.0'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: |
+          eval $(ssh-agent)
+
+          /kubeone-kae/kubeone
+
+          ssh-add /kubeone-kae/ssh-keys/id_rsa
+
+          export HCLOUD_TOKEN="{{workflow.parameters.api-token}}"
+
+          cp /kubeone-kae/kubeone-tf/* /kubeone-kae/
+
+          sed -i 's/kaecluster/{{workflow.parameters.cluster-name}}/g' /kubeone-kae/kubeone.yaml
+
+          sed -i 's/temp-token/{{workflow.parameters.api-token}}/g' /kubeone-kae/credentials.yaml
+
+          /kubeone-kae/kubeone apply --manifest kubeone.yaml --credentials credentials.yaml -t tf.json --auto-approve
+# KUBEONE RESET
+  - name: kubeone-reset
+    inputs:
+        artifacts:
+          - name: keys
+            path: /kubeone-kae/ssh-keys
+          - name: kubeonetf
+            path: /kubeone-kae/kubeone-tf
+    script:
+        name: ''
+        image: 'sokuyucu/kubeone:1.0'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: |
+          eval $(ssh-agent)
+
+          ssh-add /kubeone-kae/ssh-keys/id_rsa
+
+          export HCLOUD_TOKEN="{{workflow.parameters.api-token}}"
+
+          cp /kubeone-kae/kubeone-tf/* /kubeone-kae/
+
+          sed -i 's/kaecluster/"{{workflow.parameters.cluster-name}}"/g' /kubeone-kae/kubeone.yaml
+
+          sed -i 's/temp-token/{{workflow.parameters.api-token}}/g' /kubeone-kae/credentials.yaml
+
+          /kubeone-kae/kubeone reset --manifest kubeone.yaml --credentials credentials.yaml -t tf.json
+# APPROVE
+  - name: approve
+    suspend: {}
+
+# DAG | keygen -> terraform apply -> kubeone apply -> approve ->
+# kubeone reset -> terraform destroy
+  - name: full-cycle
+    dag:
+      tasks:
+      - name: Key-Generating
+        template: key-gen
+
+      - name: Terraform-Applying
+        dependencies: [Key-Generating]
+        template: terraform-apply
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+
+      - name: Kubeone-Applying
+        dependencies: [Terraform-Applying]
+        template: kubeone-apply
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+          - name: kubeonetf
+            from: "{{tasks.Terraform-Applying.outputs.artifacts.kubeonetf}}"
+
+      - name: Approval-for-Cluster-Destroy
+        dependencies: [Kubeone-Applying]
+        template: approve
+
+      - name: Kubeone-Resetting
+        dependencies: [Approval-for-Cluster-Destroy]
+        template: kubeone-reset
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+          - name: kubeonetf
+            from: "{{tasks.Terraform-Applying.outputs.artifacts.kubeonetf}}"
+
+      - name: Terraform-Destroying
+        dependencies: [Kubeone-Resetting]
+        template: terraform-destroy
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+          - name: tfdestroy
+            from: "{{tasks.Terraform-Applying.outputs.artifacts.tfdestroy}}"
