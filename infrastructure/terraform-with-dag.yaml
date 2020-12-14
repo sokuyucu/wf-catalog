@@ -1,0 +1,81 @@
+metadata:
+  name: terraform-dag
+  generateName: terraform-dag-
+  namespace: argo
+spec:
+  entrypoint: diamond
+  arguments:
+    parameters:
+    - name: terraform-script-repository
+      value: "http://167.233.12.7:30165/sokuyucu/terraform-kae.git"
+
+# TEMPLATES + DAG
+  templates:
+  - name: key-gen
+    container:
+      image: hashicorp/terraform:latest
+      command: [sh,-c]
+      args: ["mkdir /home/key-pairs && ssh-keygen -t rsa -N '' -f /home/key-pairs/id_rsa"]
+    outputs:
+      artifacts:
+      - name: keys
+        path: /home/key-pairs/
+
+  - name: plan
+    inputs:
+      artifacts:
+      - name: keys
+        path: /home/ssh-keys
+      - name: terraform
+        path: /home/terraform
+        git:
+          repo: "{{workflow.parameters.terraform-script-repository}}"
+          depth: 1
+    container:
+      image: hashicorp/terraform:latest
+      command: [sh, -c]
+      args: ["/bin/terraform init /home/terraform && echo yes | /bin/terraform plan /home/terraform"]
+
+
+  - name: apply
+    inputs:
+      artifacts:
+      - name: keys
+        path: /home/ssh-keys
+      - name: terraform
+        path: /home/terraform
+        git:
+          repo: "{{workflow.parameters.terraform-script-repository}}"
+          depth: 1
+    container:
+      image: hashicorp/terraform:latest
+      command: [sh, -c]
+      args: ["/bin/terraform init /home/terraform && echo yes | /bin/terraform apply /home/terraform"]
+
+  - name: approve
+    suspend: {}
+
+  - name: diamond
+    dag:
+      tasks:
+      - name: A
+        template: key-gen
+
+      - name: B
+        dependencies: [A]
+        template: plan
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.A.outputs.artifacts.keys}}"
+      - name: C
+        dependencies: [A, B]
+        template: approve
+
+      - name: D
+        dependencies: [B, C]
+        template: apply
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.A.outputs.artifacts.keys}}"
