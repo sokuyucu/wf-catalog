@@ -1,0 +1,128 @@
+# SUCCESSFUL: Serhat Ege Okuyucu
+metadata:
+  name: terraform-cycle
+  generateName: terraform-cycle-
+  namespace: argo
+spec:
+  entrypoint: full-cycle
+  arguments:
+    parameters:
+    - name: terraform-script-repository
+      value: "http://167.233.12.7:30165/sokuyucu/terraform-kae.git"
+    - name: master-replicas
+      value: ''
+    - name: worker-replicas
+      value: ''
+    - name: api-token
+      value: ''
+    - name: cluster-name
+      value: ''
+
+
+# TEMPLATES + DAG
+  templates:
+  - name: key-gen
+    container:
+      image: hashicorp/terraform:latest
+      command: [sh,-c]
+      args: ["mkdir /home/key-pairs && ssh-keygen -t rsa -N '' -f /home/key-pairs/id_rsa"]
+    outputs:
+      artifacts:
+      - name: keys
+        path: /home/key-pairs/
+
+# APPLY
+  - name: apply
+    inputs:
+        artifacts:
+          - name: keys
+            path: /home/ssh-keys
+          - name: terraform
+            path: /home/terraform
+            git:
+              repo: '{{workflow.parameters.terraform-script-repository}}'
+              depth: 1
+    outputs:
+        artifacts:
+          - name: tfdestroy
+            path: /home/tfdestroy
+    script:
+        name: ''
+        image: 'hashicorp/terraform:latest'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: >
+          sed -i 's/"temp-token"/"{{workflow.parameters.api-token}}"/g' /home/terraform/variables.tf
+
+          sed -i 's/"temp-cluster-name"/"{{workflow.parameters.cluster-name}}"/g' /home/terraform/variables.tf
+
+          sed -i 's/temp-master-replicas/{{workflow.parameters.master-replicas}}/g' /home/terraform/variables.tf
+
+          sed -i 's/temp-worker-replicas/{{workflow.parameters.worker-replicas}}/g' /home/terraform/variables.tf
+
+          cat /home/terraform/variables.tf
+
+          /bin/terraform init /home/terraform
+
+          /bin/terraform apply -auto-approve /home/terraform
+
+          mkdir /home/tfdestroy
+
+          /bin/terraform plan -destroy -out=/home/tfdestroy/destroy.plan
+          /home/terraform
+
+          cp /home/terraform/versions.tf /home/tfdestroy
+
+# DESTROY
+  - name: destroy
+    inputs:
+        artifacts:
+          - name: keys
+            path: /home/ssh-keys
+          - name: tfdestroy
+            path: /home/terraform
+    script:
+        name: ''
+        image: 'hashicorp/terraform:latest'
+        command:
+          - sh
+        imagePullPolicy: Always
+        source: |
+          ls -la /home/terraform
+
+          /bin/terraform init /home/terraform
+
+          /bin/terraform apply /home/terraform/destroy.plan
+# APPROVE
+  - name: approve
+    suspend: {}
+
+# DAG
+  - name: full-cycle
+    dag:
+      tasks:
+      - name: Key-Generating
+        template: key-gen
+
+      - name: Terraform-Applying
+        dependencies: [Key-Generating]
+        template: apply
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+
+      - name: Approval-for-Terraform-Destroy
+        dependencies: [Terraform-Applying]
+        template: approve
+
+      - name: Terraform-Destroying
+        dependencies: [Approval-for-Terraform-Destroy]
+        template: destroy
+        arguments:
+          artifacts:
+          - name: keys
+            from: "{{tasks.Key-Generating.outputs.artifacts.keys}}"
+          - name: tfdestroy
+            from: "{{tasks.Terraform-Applying.outputs.artifacts.tfdestroy}}"
