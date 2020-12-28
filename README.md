@@ -12,5 +12,5 @@ After saving go ahead and submit your workflow, Argo will ask you about the inpu
 
 ## Contents
 There are two different workflows:
-1.full-cluster: asks for every detail as input parameters.
-2.basic-cluster: asks only machine replicas.
+1. full-cluster: asks for every detail as input parameters.
+2. basic-cluster: asks only machine replicas.
